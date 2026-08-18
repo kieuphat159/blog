@@ -79,9 +79,10 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     // Luôn lưu vào fallback map để phòng hờ
     this.fallbackMap.set(key, value);
     if (ttlSeconds) {
+      // unref so a pending cache expiry never keeps the Node event loop alive on its own.
       setTimeout(() => {
         this.fallbackMap.delete(key);
-      }, ttlSeconds * 1000);
+      }, ttlSeconds * 1000).unref();
     }
   }
 
