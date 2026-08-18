@@ -23,8 +23,14 @@ export class PostService {
   }
 
   private async incrementCacheVersion(): Promise<void> {
-    const newVersion = Date.now().toString();
-    await this.redisService.set('posts:cache_version', newVersion);
+    // Date.now() only has millisecond resolution, so a write landing in the same
+    // millisecond as the previous version bump would reuse that version and keep the
+    // stale feed cached for its full TTL. Force the version to move forward.
+    const current = Number(await this.redisService.get('posts:cache_version'));
+    const now = Date.now();
+    const newVersion =
+      Number.isFinite(current) && now <= current ? current + 1 : now;
+    await this.redisService.set('posts:cache_version', newVersion.toString());
   }
 
   async findAll({
@@ -250,18 +256,23 @@ export class PostService {
     if (!authorIdMatch) {
       throw new Error('You are not authorized to update this post.');
     }
-    const { postId, ...data } = updatePostInput;
+    const { postId, tags, ...data } = updatePostInput;
     const updated = await this.prisma.post.update({
       where: { id: postId },
       data: {
         ...data,
-        tags: {
-          set: [],
-          connectOrCreate: updatePostInput.tags!.map((tag) => ({
-            where: { name: tag },
-            create: { name: tag },
-          })),
-        },
+        // UpdatePostInput is a PartialType, so a partial update may omit tags entirely.
+        // Only rewrite the relation when the caller actually sent one - otherwise this
+        // would either throw on undefined.map() or silently wipe the post's tags.
+        ...(tags !== undefined && {
+          tags: {
+            set: [],
+            connectOrCreate: tags.map((tag) => ({
+              where: { name: tag },
+              create: { name: tag },
+            })),
+          },
+        }),
       },
     });
     await this.incrementCacheVersion();
