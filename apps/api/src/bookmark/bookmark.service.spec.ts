@@ -1,125 +1,129 @@
-import { BookmarkService } from './bookmark.service';
 import { BadRequestException } from '@nestjs/common';
+import { BookmarkService } from './bookmark.service';
 
 describe('BookmarkService', () => {
-  let bookmarkService: BookmarkService;
-  let prismaMock: any;
+  let prisma: any;
+  let service: BookmarkService;
+
+  const USER = 1;
+  const POST = 2;
+  const key = { userId_postId: { userId: USER, postId: POST } };
 
   beforeEach(() => {
-    prismaMock = {
+    prisma = {
       bookmark: {
-        create: jest.fn(),
-        delete: jest.fn(),
+        create: jest.fn().mockResolvedValue({ id: 1 }),
+        delete: jest.fn().mockResolvedValue({ id: 1 }),
         findUnique: jest.fn(),
-        findMany: jest.fn(),
+        findMany: jest.fn().mockResolvedValue([]),
         count: jest.fn(),
       },
     };
-    bookmarkService = new BookmarkService(prismaMock);
+    service = new BookmarkService(prisma);
   });
 
   describe('bookmarkPost', () => {
-    it('should successfully create bookmark and return true', async () => {
-      prismaMock.bookmark.create.mockResolvedValue({ id: 1 });
-      const result = await bookmarkService.bookmarkPost({
-        userId: 1,
-        postId: 2,
+    it('records the bookmark', async () => {
+      await expect(
+        service.bookmarkPost({ userId: USER, postId: POST }),
+      ).resolves.toBe(true);
+      expect(prisma.bookmark.create).toHaveBeenCalledWith({
+        data: { userId: USER, postId: POST },
       });
-      expect(prismaMock.bookmark.create).toHaveBeenCalledWith({
-        data: { userId: 1, postId: 2 },
-      });
-      expect(result).toBe(true);
     });
 
-    it('should throw BadRequestException if creation fails', async () => {
-      prismaMock.bookmark.create.mockRejectedValue(new Error('DB Error'));
+    // The unique constraint on (userId, postId) and a missing post both surface here.
+    it('reports a duplicate or missing post as a bad request', async () => {
+      prisma.bookmark.create.mockRejectedValue(new Error('unique constraint'));
+
       await expect(
-        bookmarkService.bookmarkPost({ userId: 1, postId: 2 }),
+        service.bookmarkPost({ userId: USER, postId: POST }),
       ).rejects.toThrow(BadRequestException);
     });
   });
 
   describe('removeBookmark', () => {
-    it('should successfully delete bookmark and return true', async () => {
-      prismaMock.bookmark.delete.mockResolvedValue({ id: 1 });
-      const result = await bookmarkService.removeBookmark({
-        userId: 1,
-        postId: 2,
-      });
-      expect(prismaMock.bookmark.delete).toHaveBeenCalledWith({
-        where: { userId_postId: { userId: 1, postId: 2 } },
-      });
-      expect(result).toBe(true);
+    it('deletes by the composite key so one user cannot unbookmark for another', async () => {
+      await expect(
+        service.removeBookmark({ userId: USER, postId: POST }),
+      ).resolves.toBe(true);
+      expect(prisma.bookmark.delete).toHaveBeenCalledWith({ where: key });
     });
 
-    it('should throw BadRequestException if deletion fails', async () => {
-      prismaMock.bookmark.delete.mockRejectedValue(new Error('DB Error'));
+    it('reports removing a bookmark that is not there as a bad request', async () => {
+      prisma.bookmark.delete.mockRejectedValue(new Error('record not found'));
+
       await expect(
-        bookmarkService.removeBookmark({ userId: 1, postId: 2 }),
+        service.removeBookmark({ userId: USER, postId: POST }),
       ).rejects.toThrow(BadRequestException);
     });
   });
 
   describe('isBookmarked', () => {
-    it('should return true if bookmark exists', async () => {
-      prismaMock.bookmark.findUnique.mockResolvedValue({ id: 1 });
-      const result = await bookmarkService.isBookmarked({
-        userId: 1,
-        postId: 2,
-      });
-      expect(prismaMock.bookmark.findUnique).toHaveBeenCalledWith({
-        where: { userId_postId: { userId: 1, postId: 2 } },
-      });
-      expect(result).toBe(true);
-    });
+    it.each([
+      [{ id: 1 }, true],
+      [null, false],
+    ])('maps %p to %p', async (row, expected) => {
+      prisma.bookmark.findUnique.mockResolvedValue(row);
 
-    it('should return false if bookmark does not exist', async () => {
-      prismaMock.bookmark.findUnique.mockResolvedValue(null);
-      const result = await bookmarkService.isBookmarked({
-        userId: 1,
-        postId: 2,
-      });
-      expect(result).toBe(false);
+      await expect(
+        service.isBookmarked({ userId: USER, postId: POST }),
+      ).resolves.toBe(expected);
+      expect(prisma.bookmark.findUnique).toHaveBeenCalledWith({ where: key });
     });
   });
 
   describe('myBookmarks', () => {
-    it('should query bookmarks with pagination and relation details', async () => {
-      const expectedBookmarks = [{ id: 1, post: {} }];
-      prismaMock.bookmark.findMany.mockResolvedValue(expectedBookmarks);
+    const argsOf = () => prisma.bookmark.findMany.mock.calls[0][0];
 
-      const result = await bookmarkService.myBookmarks({
-        userId: 1,
-        skip: 0,
-        take: 5,
-      });
+    it('returns only the caller bookmarks, newest first', async () => {
+      const rows = [{ id: 1, post: {} }];
+      prisma.bookmark.findMany.mockResolvedValue(rows);
 
-      expect(prismaMock.bookmark.findMany).toHaveBeenCalledWith({
-        where: { userId: 1 },
-        include: {
-          post: {
-            include: {
-              author: { select: { id: true, name: true, avatar: true } },
-              _count: { select: { comments: true, likes: true } },
-            },
-          },
-        },
-        orderBy: { createdAt: 'desc' },
-        skip: 0,
-        take: 5,
+      await expect(
+        service.myBookmarks({ userId: USER, skip: 0, take: 5 }),
+      ).resolves.toBe(rows);
+
+      expect(argsOf().where).toEqual({ userId: USER });
+      expect(argsOf().orderBy).toEqual({ createdAt: 'desc' });
+    });
+
+    it('honours pagination', async () => {
+      await service.myBookmarks({ userId: USER, skip: 20, take: 5 });
+
+      expect(argsOf().skip).toBe(20);
+      expect(argsOf().take).toBe(5);
+    });
+
+    it('defaults to the first page', async () => {
+      await service.myBookmarks({ userId: USER });
+
+      expect(argsOf().skip).toBe(0);
+      expect(argsOf().take).toBe(10);
+    });
+
+    // The bookmarks page renders each post with its author and its like/comment totals;
+    // dropping either from the query turns the list into a wall of blanks.
+    it('loads the post details the list needs in one query', async () => {
+      await service.myBookmarks({ userId: USER });
+
+      const post = argsOf().include.post.include;
+      expect(post.author.select).toMatchObject({ id: true, name: true });
+      expect(post._count.select).toMatchObject({
+        comments: true,
+        likes: true,
       });
-      expect(result).toEqual(expectedBookmarks);
     });
   });
 
   describe('myBookmarksCount', () => {
-    it('should return count of bookmarks for user', async () => {
-      prismaMock.bookmark.count.mockResolvedValue(3);
-      const result = await bookmarkService.myBookmarksCount(1);
-      expect(prismaMock.bookmark.count).toHaveBeenCalledWith({
-        where: { userId: 1 },
+    it('counts only the caller bookmarks', async () => {
+      prisma.bookmark.count.mockResolvedValue(3);
+
+      await expect(service.myBookmarksCount(USER)).resolves.toBe(3);
+      expect(prisma.bookmark.count).toHaveBeenCalledWith({
+        where: { userId: USER },
       });
-      expect(result).toBe(3);
     });
   });
 });

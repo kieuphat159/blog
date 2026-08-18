@@ -1,192 +1,173 @@
 import { CommentService } from './comment.service';
 import { CreateCommentInput } from './dto/create-comment.input';
 import { NotificationType } from 'src/notification/entities/notification.entity';
+import { DEFAULT_PAGE_SIZE } from 'src/constant';
 
 describe('CommentService', () => {
-  let commentService: CommentService;
-  let prismaMock: any;
-  let notificationServiceMock: any;
+  let prisma: any;
+  let notifications: { create: jest.Mock };
+  let service: CommentService;
+
+  const AUTHOR = 10;
+  const POST_AUTHOR = 20;
+  const PARENT_AUTHOR = 30;
 
   beforeEach(() => {
-    prismaMock = {
+    prisma = {
       comment: {
-        findMany: jest.fn(),
+        findMany: jest.fn().mockResolvedValue([]),
         count: jest.fn(),
-        create: jest.fn(),
+        create: jest.fn().mockResolvedValue({ id: 100 }),
         findUnique: jest.fn(),
       },
-      post: {
-        findUnique: jest.fn(),
-      },
+      post: { findUnique: jest.fn() },
     };
-
-    notificationServiceMock = {
-      create: jest.fn(),
-    };
-
-    commentService = new CommentService(prismaMock, notificationServiceMock);
+    notifications = { create: jest.fn() };
+    service = new CommentService(prisma, notifications as any);
   });
 
   describe('findOneByPost', () => {
-    it('should query comments with null parentId and include replies', async () => {
-      const postId = 1;
-      const skip = 0;
-      const take = 10;
-      const expectedComments = [{ id: 1, content: 'Comment 1', replies: [] }];
+    const argsOf = () => prisma.comment.findMany.mock.calls[0][0];
 
-      prismaMock.comment.findMany.mockResolvedValue(expectedComments);
+    it('returns only top-level comments, with their replies attached', async () => {
+      await service.findOneByPost({ postId: 1 });
 
-      const result = await commentService.findOneByPost({ postId, skip, take });
+      expect(argsOf().where).toEqual({ postId: 1, parentId: null });
+      expect(argsOf().include.replies).toBeDefined();
+    });
 
-      expect(prismaMock.comment.findMany).toHaveBeenCalledWith({
-        where: { postId, parentId: null },
-        include: {
-          author: true,
-          replies: {
-            include: {
-              author: true,
-            },
-            orderBy: {
-              createdAt: 'asc',
-            },
-          },
-        },
-        orderBy: {
-          createdAt: 'desc',
-        },
-        take,
-        skip,
-      });
-      expect(result).toEqual(expectedComments);
+    it('shows newest threads first but replies within a thread oldest first', async () => {
+      await service.findOneByPost({ postId: 1 });
+
+      expect(argsOf().orderBy).toEqual({ createdAt: 'desc' });
+      expect(argsOf().include.replies.orderBy).toEqual({ createdAt: 'asc' });
+    });
+
+    it('falls back to the default page size', async () => {
+      await service.findOneByPost({ postId: 1 });
+
+      expect(argsOf().take).toBe(DEFAULT_PAGE_SIZE);
+      expect(argsOf().skip).toBe(0);
+    });
+
+    it('honours explicit pagination', async () => {
+      await service.findOneByPost({ postId: 1, skip: 20, take: 5 });
+
+      expect(argsOf().take).toBe(5);
+      expect(argsOf().skip).toBe(20);
     });
   });
 
   describe('count', () => {
-    it('should return total count of comments for a post', async () => {
-      const postId = 1;
-      prismaMock.comment.count.mockResolvedValue(5);
+    it('counts replies as well as top-level comments', async () => {
+      prisma.comment.count.mockResolvedValue(5);
 
-      const result = await commentService.count(postId);
-
-      expect(prismaMock.comment.count).toHaveBeenCalledWith({
-        where: { postId },
+      await expect(service.count(1)).resolves.toBe(5);
+      expect(prisma.comment.count).toHaveBeenCalledWith({
+        where: { postId: 1 },
       });
-      expect(result).toBe(5);
     });
   });
 
   describe('create', () => {
-    it('should create a direct comment and send notification to post author', async () => {
-      const userId = 10;
-      const postAuthorId = 20;
-      const input: CreateCommentInput = {
-        postId: 1,
-        content: 'Nice post!',
-      };
-      const createdComment = {
+    const topLevel: CreateCommentInput = { postId: 1, content: 'Nice post!' };
+    const reply: CreateCommentInput = {
+      postId: 1,
+      content: 'Thank you!',
+      parentId: 50,
+    };
+
+    it('links a top-level comment to its post and author, with no parent', async () => {
+      prisma.post.findUnique.mockResolvedValue({ authorId: POST_AUTHOR });
+
+      await expect(service.create(topLevel, AUTHOR)).resolves.toEqual({
         id: 100,
+      });
+
+      const data = prisma.comment.create.mock.calls[0][0].data;
+      expect(data).toEqual({
         content: 'Nice post!',
-        authorId: userId,
-        postId: 1,
-      };
-
-      prismaMock.comment.create.mockResolvedValue(createdComment);
-      prismaMock.post.findUnique.mockResolvedValue({ authorId: postAuthorId });
-
-      const result = await commentService.create(input, userId);
-
-      expect(prismaMock.comment.create).toHaveBeenCalledWith({
-        data: {
-          content: input.content,
-          post: { connect: { id: input.postId } },
-          author: { connect: { id: userId } },
-        },
+        post: { connect: { id: 1 } },
+        author: { connect: { id: AUTHOR } },
       });
-
-      expect(prismaMock.post.findUnique).toHaveBeenCalledWith({
-        where: { id: input.postId },
-        select: { authorId: true },
-      });
-
-      expect(notificationServiceMock.create).toHaveBeenCalledWith({
-        recipientId: postAuthorId,
-        actorId: userId,
-        type: NotificationType.POST_COMMENTED,
-        postId: input.postId,
-        commentId: createdComment.id,
-      });
-
-      expect(result).toEqual(createdComment);
     });
 
-    it('should create a reply comment and send notification to parent comment author', async () => {
-      const userId = 10;
-      const parentCommentAuthorId = 30;
-      const input: CreateCommentInput = {
-        postId: 1,
-        content: 'Thank you!',
-        parentId: 50,
-      };
-      const createdComment = {
-        id: 101,
-        content: 'Thank you!',
-        authorId: userId,
-        postId: 1,
-        parentId: 50,
-      };
+    it('links a reply to its parent comment', async () => {
+      prisma.comment.findUnique.mockResolvedValue({ authorId: PARENT_AUTHOR });
 
-      prismaMock.comment.create.mockResolvedValue(createdComment);
-      prismaMock.comment.findUnique.mockResolvedValue({
-        authorId: parentCommentAuthorId,
+      await service.create(reply, AUTHOR);
+
+      expect(prisma.comment.create.mock.calls[0][0].data.parent).toEqual({
+        connect: { id: 50 },
       });
-
-      const result = await commentService.create(input, userId);
-
-      expect(prismaMock.comment.create).toHaveBeenCalledWith({
-        data: {
-          content: input.content,
-          post: { connect: { id: input.postId } },
-          author: { connect: { id: userId } },
-          parent: { connect: { id: input.parentId } },
-        },
-      });
-
-      expect(prismaMock.comment.findUnique).toHaveBeenCalledWith({
-        where: { id: input.parentId },
-        select: { authorId: true },
-      });
-
-      expect(notificationServiceMock.create).toHaveBeenCalledWith({
-        recipientId: parentCommentAuthorId,
-        actorId: userId,
-        type: NotificationType.POST_COMMENTED,
-        postId: input.postId,
-        commentId: createdComment.id,
-      });
-
-      expect(result).toEqual(createdComment);
     });
 
-    it('should not send notification if the actor is the recipient', async () => {
-      const userId = 10;
-      const input: CreateCommentInput = {
+    it('notifies the post author for a top-level comment', async () => {
+      prisma.post.findUnique.mockResolvedValue({ authorId: POST_AUTHOR });
+
+      await service.create(topLevel, AUTHOR);
+
+      expect(notifications.create).toHaveBeenCalledWith({
+        recipientId: POST_AUTHOR,
+        actorId: AUTHOR,
+        type: NotificationType.POST_COMMENTED,
         postId: 1,
-        content: 'Self comment',
-      };
-      const createdComment = {
-        id: 102,
-        content: 'Self comment',
-        authorId: userId,
-        postId: 1,
-      };
+        commentId: 100,
+      });
+    });
 
-      prismaMock.comment.create.mockResolvedValue(createdComment);
-      prismaMock.post.findUnique.mockResolvedValue({ authorId: userId }); // Self comment
+    it('notifies the parent comment author for a reply, not the post author', async () => {
+      prisma.comment.findUnique.mockResolvedValue({ authorId: PARENT_AUTHOR });
 
-      const result = await commentService.create(input, userId);
+      await service.create(reply, AUTHOR);
 
-      expect(notificationServiceMock.create).not.toHaveBeenCalled();
-      expect(result).toEqual(createdComment);
+      expect(prisma.post.findUnique).not.toHaveBeenCalled();
+      expect(notifications.create).toHaveBeenCalledWith(
+        expect.objectContaining({ recipientId: PARENT_AUTHOR }),
+      );
+    });
+
+    it('does not notify you about your own comment on your own post', async () => {
+      prisma.post.findUnique.mockResolvedValue({ authorId: AUTHOR });
+
+      await service.create(topLevel, AUTHOR);
+
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    it('does not notify you about replying to yourself', async () => {
+      prisma.comment.findUnique.mockResolvedValue({ authorId: AUTHOR });
+
+      await service.create(reply, AUTHOR);
+
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    it('still returns the comment when the post row cannot be read', async () => {
+      prisma.post.findUnique.mockResolvedValue(null);
+
+      await expect(service.create(topLevel, AUTHOR)).resolves.toEqual({
+        id: 100,
+      });
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    it('still returns the reply when the parent comment cannot be read', async () => {
+      prisma.comment.findUnique.mockResolvedValue(null);
+
+      await expect(service.create(reply, AUTHOR)).resolves.toEqual({ id: 100 });
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    it('treats parentId 0 as no parent', async () => {
+      prisma.post.findUnique.mockResolvedValue({ authorId: POST_AUTHOR });
+
+      await service.create({ ...topLevel, parentId: 0 }, AUTHOR);
+
+      expect(prisma.comment.create.mock.calls[0][0].data).not.toHaveProperty(
+        'parent',
+      );
+      expect(prisma.post.findUnique).toHaveBeenCalled();
     });
   });
 });
