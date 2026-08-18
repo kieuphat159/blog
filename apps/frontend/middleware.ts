@@ -1,10 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSession } from "@/lib/session";
+import { verifySessionToken } from "@/lib/sessionToken";
 
 export async function middleware(request: NextRequest) {
-    const session = await getSession();
+    const token = request.cookies.get("session")?.value;
+    const session = await verifySessionToken(token);
+
     if (!session || !session.user) {
-        return NextResponse.redirect(new URL('/auth/signin', request.url));
+        const response = NextResponse.redirect(new URL('/auth/signin', request.url));
+        // Drop the stale/invalid cookie so the next request doesn't fail verification again.
+        if (token) response.cookies.delete("session");
+        return response;
     }
 }
 

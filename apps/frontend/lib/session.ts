@@ -1,21 +1,10 @@
-import { jwtVerify, SignJWT } from "jose";
+import { SignJWT } from "jose";
 import { cookies } from "next/headers";
-import { redirect } from "next/navigation";
+import { encodeKey, verifySessionToken, type Session } from "./sessionToken";
 
-export type SessionUser = {
-    id?: string;
-    name?: string;
-    avatar?: string;
-    bio?: string;
-};
+export type { Session, SessionUser } from "./sessionToken";
+export { verifySessionToken } from "./sessionToken";
 
-export type Session = {
-    user: SessionUser;
-    accessToken: string;
-};
-
-const secretKey = process.env.SESSION_SECRET_KEY!;
-const encodeKey = new TextEncoder().encode(secretKey);
 const isProduction = process.env.NODE_ENV === "production";
 
 export async function createSession(payload: Session) {
@@ -35,19 +24,9 @@ export async function createSession(payload: Session) {
     });
 }
 
-export async function getSession() {
+export async function getSession(): Promise<Session | null> {
     const cookie = (await cookies()).get("session")?.value;
-
-    if (!cookie) return null;
-    try {
-        const { payload } = await jwtVerify(cookie, encodeKey, {
-            algorithms: ['HS256']
-        });
-        return payload as Session;
-    } catch (error) {
-        console.error("Failed to verify session token:", error);
-        redirect('/api/auth/signout');
-    }
+    return verifySessionToken(cookie);
 }
 
 export async function deleteSession() {
