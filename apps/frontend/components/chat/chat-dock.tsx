@@ -233,6 +233,7 @@ export default function ChatDock({ session }: Props) {
     peerConnection.onicecandidate = (event) => {
       if (event.candidate && socketRef.current && pendingCallRef.current) {
         socketRef.current.emit("call:ice-candidate", {
+          conversationId: pendingCallRef.current.conversationId,
           targetUserId,
           candidate: event.candidate.toJSON(),
         });
@@ -400,24 +401,29 @@ export default function ChatDock({ session }: Props) {
     socket.on("call:accepted", async () => {
       setCallState("connected");
 
-      const targetUserId = pendingCallRef.current?.targetUserId;
-      if (!targetUserId) return;
+      const pending = pendingCallRef.current;
+      if (!pending) return;
 
-      const peer = await ensurePeerConnection(targetUserId);
+      const peer = await ensurePeerConnection(pending.targetUserId);
       const offer = await peer.createOffer();
       await peer.setLocalDescription(offer);
       socketRef.current?.emit("call:offer", {
-        targetUserId,
+        conversationId: pending.conversationId,
+        targetUserId: pending.targetUserId,
         offer,
       });
     });
 
     socket.on("call:offer", async (payload: { fromUserId: number; offer: RTCSessionDescriptionInit }) => {
+      const conversationId = pendingCallRef.current?.conversationId;
+      if (!conversationId) return;
+
       const peer = await ensurePeerConnection(payload.fromUserId);
       await peer.setRemoteDescription(new RTCSessionDescription(payload.offer));
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
       socketRef.current?.emit("call:answer", {
+        conversationId,
         targetUserId: payload.fromUserId,
         answer,
       });

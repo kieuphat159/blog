@@ -124,6 +124,11 @@ export class CallGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ) {
     const start = Date.now();
     const user = this.requireUser(client);
+
+    if (!(await this.isCallPeer(body.conversationId, user.id, body.fromUserId))) {
+      return this.denySignal('call:accept', start, body.conversationId);
+    }
+
     this.server.to(this.userRoom(body.fromUserId)).emit('call:accepted', {
       conversationId: body.conversationId,
       toUserId: user.id,
@@ -141,12 +146,18 @@ export class CallGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @SubscribeMessage('call:offer')
   async handleOffer(
     @ConnectedSocket() client: AuthedSocket,
-    @MessageBody() body: { targetUserId: number; offer: unknown },
+    @MessageBody()
+    body: { conversationId: number; targetUserId: number; offer: unknown },
   ) {
-    this.requireUser(client);
     const start = Date.now();
+    const user = this.requireUser(client);
+
+    if (!(await this.isCallPeer(body.conversationId, user.id, body.targetUserId))) {
+      return this.denySignal('call:offer', start, body.conversationId);
+    }
+
     this.server.to(this.userRoom(body.targetUserId)).emit('call:offer', {
-      fromUserId: client.data.user!.id,
+      fromUserId: user.id,
       offer: body.offer,
     });
     logWSTiming('call:offer', Date.now() - start, {
@@ -157,12 +168,18 @@ export class CallGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @SubscribeMessage('call:answer')
   async handleAnswer(
     @ConnectedSocket() client: AuthedSocket,
-    @MessageBody() body: { targetUserId: number; answer: unknown },
+    @MessageBody()
+    body: { conversationId: number; targetUserId: number; answer: unknown },
   ) {
-    this.requireUser(client);
     const start = Date.now();
+    const user = this.requireUser(client);
+
+    if (!(await this.isCallPeer(body.conversationId, user.id, body.targetUserId))) {
+      return this.denySignal('call:answer', start, body.conversationId);
+    }
+
     this.server.to(this.userRoom(body.targetUserId)).emit('call:answer', {
-      fromUserId: client.data.user!.id,
+      fromUserId: user.id,
       answer: body.answer,
     });
     logWSTiming('call:answer', Date.now() - start, {
@@ -177,6 +194,11 @@ export class CallGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ) {
     const start = Date.now();
     const user = this.requireUser(client);
+
+    if (!(await this.isCallPeer(body.conversationId, user.id, body.fromUserId))) {
+      return this.denySignal('call:reject', start, body.conversationId);
+    }
+
     this.server.to(this.userRoom(body.fromUserId)).emit('call:rejected', {
       conversationId: body.conversationId,
       fromUserId: user.id,
@@ -194,10 +216,16 @@ export class CallGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @SubscribeMessage('call:ice-candidate')
   async handleIceCandidate(
     @ConnectedSocket() client: AuthedSocket,
-    @MessageBody() body: { targetUserId: number; candidate: unknown },
+    @MessageBody()
+    body: { conversationId: number; targetUserId: number; candidate: unknown },
   ) {
     const start = Date.now();
     const user = this.requireUser(client);
+
+    if (!(await this.isCallPeer(body.conversationId, user.id, body.targetUserId))) {
+      return this.denySignal('call:ice-candidate', start, body.conversationId);
+    }
+
     this.server
       .to(this.userRoom(body.targetUserId))
       .emit('call:ice-candidate', {
@@ -212,7 +240,13 @@ export class CallGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: AuthedSocket,
     @MessageBody() body: { conversationId: number; targetUserId: number },
   ) {
+    const start = Date.now();
     const user = this.requireUser(client);
+
+    if (!(await this.isCallPeer(body.conversationId, user.id, body.targetUserId))) {
+      return this.denySignal('call:hangup', start, body.conversationId);
+    }
+
     this.server.to(this.userRoom(body.targetUserId)).emit('call:ended', {
       conversationId: body.conversationId,
       fromUserId: user.id,
@@ -233,6 +267,39 @@ export class CallGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
 
     return token.trim();
+  }
+
+  /**
+   * Every signalling event must be re-authorized, not just call:invite. Otherwise any
+   * authenticated socket could push WebRTC offers/answers/ICE candidates at an arbitrary
+   * targetUserId without ever sharing a conversation with them.
+   */
+  private isCallPeer(
+    conversationId: number,
+    userId: number,
+    peerUserId: number,
+  ) {
+    if (
+      !Number.isInteger(conversationId) ||
+      !Number.isInteger(peerUserId) ||
+      peerUserId === userId
+    ) {
+      return Promise.resolve(false);
+    }
+
+    return this.callService.canInitiateCall(conversationId, userId, peerUserId);
+  }
+
+  private denySignal(event: string, start: number, conversationId: number) {
+    logWSTiming(event, Date.now() - start, {
+      result: 'unauthorized',
+      conversationId,
+    });
+
+    return {
+      event: 'call:unauthorized',
+      data: { message: 'Unable to signal this call' },
+    };
   }
 
   private requireUser(client: AuthedSocket) {
