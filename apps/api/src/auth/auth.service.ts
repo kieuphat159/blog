@@ -31,7 +31,20 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    const passwordMatched = await verify(user.password, password);
+    // Accounts created through OAuth (see google.strategy.ts) are stored with an empty
+    // password, which is not a valid argon2 hash. Passing it to verify() throws, so reject
+    // those up front and treat any malformed hash as a failed login rather than a 500.
+    if (!user.password) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
+    let passwordMatched: boolean;
+    try {
+      passwordMatched = await verify(user.password, password);
+    } catch {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
     if (!passwordMatched) {
       throw new UnauthorizedException('Invalid credentials');
     }
